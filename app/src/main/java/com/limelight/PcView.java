@@ -3,6 +3,7 @@ package com.limelight;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.UnknownHostException;
+import java.nio.IntBuffer;
 
 import com.limelight.binding.PlatformBinding;
 import com.limelight.binding.crypto.AndroidCryptoProvider;
@@ -35,6 +36,7 @@ import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.res.Configuration;
+import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.os.Build;
 import android.os.Bundle;
@@ -182,6 +184,8 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
         pcGridAdapter.notifyDataSetChanged();
     }
 
+
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -192,7 +196,9 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
 
         // Create a GLSurfaceView to fetch GLRenderer unless we have
         // a cached result already.
+        
         final GlPreferences glPrefs = GlPreferences.readPreferences(this);
+
         if (!glPrefs.savedFingerprint.equals(Build.FINGERPRINT) || glPrefs.glRenderer.isEmpty()) {
             GLSurfaceView surfaceView = new GLSurfaceView(this);
             surfaceView.setRenderer(new GLSurfaceView.Renderer() {

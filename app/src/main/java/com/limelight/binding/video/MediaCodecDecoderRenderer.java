@@ -3,6 +3,7 @@ package com.limelight.binding.video;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.IntBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -28,6 +29,7 @@ import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.media.MediaCodec.BufferInfo;
 import android.media.MediaCodec.CodecException;
+import android.opengl.GLES20;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -1044,6 +1046,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         });
     }
 
+
+
     private void startRendererThread()
     {
         rendererThread = new Thread() {
@@ -1078,6 +1082,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                                         // Use a PTS that will cause this frame to never be dropped
                                         videoDecoder.releaseOutputBuffer(lastIndex, 0);
+
                                     }
                                     else {
                                         videoDecoder.releaseOutputBuffer(lastIndex, true);
@@ -1088,6 +1093,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                         // Use a PTS that will cause this frame to be dropped if another comes in within
                                         // the same V-sync period
                                         videoDecoder.releaseOutputBuffer(lastIndex, System.nanoTime());
+
+
                                     }
                                     else {
                                         videoDecoder.releaseOutputBuffer(lastIndex, true);

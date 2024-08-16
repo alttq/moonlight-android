@@ -10,6 +10,8 @@ import android.content.IntentFilter;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
+import android.hardware.usb.UsbInterface;
+
 import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
@@ -90,6 +92,8 @@ public class UsbDriverService extends Service implements UsbDriverListener {
                     @Override
                     public void run() {
                         // Continue the state machine
+                        LimeLog.info("LIBUSB dev.getDeviceName() " + device.getDeviceName() + " vendor id " + device.getVendorId() + " product id " + device.getProductId());
+                        //device.getProductId();
                         handleUsbDeviceState(device);
                     }
                 }, 1000);
@@ -105,6 +109,7 @@ public class UsbDriverService extends Service implements UsbDriverListener {
 
                 // If we got this far, we've already found we're able to handle this device
                 if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                    LimeLog.info("LIBUSB vendor id " + device.getVendorId() + " product id " + device.getProductId());
                     handleUsbDeviceState(device);
                 }
             }
@@ -138,8 +143,12 @@ public class UsbDriverService extends Service implements UsbDriverListener {
 
     private void handleUsbDeviceState(UsbDevice device) {
         // Are we able to operate it?
-        if (shouldClaimDevice(device, prefConfig.bindAllUsb)) {
+        LimeLog.info("LIBUSB dev.getDeviceName() " + device.getDeviceName() + " vendor id " + device.getVendorId() + " product id " + device.getProductId());
+//(dev.getVendorId() == 0x046D && dev.getProductId() == 0xC547)
+        if (shouldClaimDevice(device, prefConfig.bindAllUsb) || device.getVendorId() == 0x1915 && device.getProductId() == 0x0102 || device.getVendorId() == 0x046D && device.getProductId() == 0xC547) {
             // Do we have permission yet?
+            LimeLog.info("LIBUSB Claiming device" + device.getDeviceName() + " vendor id " + device.getVendorId() + " product id " + device.getProductId());
+
             if (!usbManager.hasPermission(device)) {
                 // Let's ask for permission
                 try {
@@ -164,24 +173,42 @@ public class UsbDriverService extends Service implements UsbDriverListener {
                     // Use an explicit intent to activate our unexported broadcast receiver, as required on Android 14+
                     Intent i = new Intent(ACTION_USB_PERMISSION);
                     i.setPackage(getPackageName());
-
                     usbManager.requestPermission(device, PendingIntent.getBroadcast(UsbDriverService.this, 0, i, intentFlags));
+
                 } catch (SecurityException e) {
                     Toast.makeText(this, this.getText(R.string.error_usb_prohibited), Toast.LENGTH_LONG).show();
                     if (stateListener != null) {
                         stateListener.onUsbPermissionPromptCompleted();
+                        LimeLog.info("LIBUSB Claiming success");
+
                     }
                 }
                 return;
             }
-
             // Open the device
+            UsbInterface intf = device.getInterface(0);
+
             UsbDeviceConnection connection = usbManager.openDevice(device);
+
             if (connection == null) {
-                LimeLog.warning("Unable to open USB device: "+device.getDeviceName());
+                LimeLog.warning("LIBUSB Unable to open USB device: "+device.getDeviceName());
                 return;
             }
-
+            else{
+                LimeLog.info("LIBUSB Successfully opened device");
+            }
+            connection.claimInterface(intf, true);
+            int fileDescriptor = connection.getFileDescriptor();
+            if (device.getVendorId() == 0x1915 && device.getProductId() == 0x0102)
+            {
+                initializeNativeDevice(fileDescriptor);
+            }
+            if (device.getVendorId() == 0x046D && device.getProductId() == 0xC547)
+            {
+                initializeNativeMouseDevice(fileDescriptor);
+            }
+            LimeLog.info("LIBUSB Continuation after opened device");
+            /*
 
             AbstractController controller;
 
@@ -206,7 +233,7 @@ public class UsbDriverService extends Service implements UsbDriverListener {
             }
 
             // Add this controller to the list
-            controllers.add(controller);
+            controllers.add(controller);*/
         }
     }
 
@@ -219,6 +246,7 @@ public class UsbDriverService extends Service implements UsbDriverListener {
                 // Device was removed while looping
                 continue;
             }
+            LimeLog.info("LIBUSB dev.getDeviceName() " + device.getDeviceName() + " vendor id " + device.getVendorId() + " product id " + device.getProductId());
 
             if (inputDev.getVendorId() == device.getVendorId() &&
                     inputDev.getProductId() == device.getProductId()) {
@@ -286,6 +314,7 @@ public class UsbDriverService extends Service implements UsbDriverListener {
         if (started || usbManager == null) {
             return;
         }
+        LimeLog.info("LIBUSB started usb");
 
         started = true;
 
@@ -302,8 +331,20 @@ public class UsbDriverService extends Service implements UsbDriverListener {
 
         // Enumerate existing devices
         for (UsbDevice dev : usbManager.getDeviceList().values()) {
+            LimeLog.info("LIBUSB dev.getDeviceName() " + dev.getDeviceName() + " vendor id " + dev.getVendorId() + " product id " + dev.getProductId());
+            if (dev.getVendorId() == 0x1915 && dev.getProductId() == 0x0102)
+            {
+                LimeLog.info("LIBUSB claiming device: "+ dev.getDeviceName() + " " + dev.getVendorId() + " " + dev.getProductId());
+                handleUsbDeviceState(dev);
+            }
+            if (dev.getVendorId() == 0x046D && dev.getProductId() == 0xC547)
+            {
+                LimeLog.info("LIBUSB claiming device: "+ dev.getDeviceName() + " " + dev.getVendorId() + " " + dev.getProductId());
+                handleUsbDeviceState(dev);
+            }
             if (shouldClaimDevice(dev, prefConfig.bindAllUsb)) {
                 // Start the process of claiming this device
+                LimeLog.info("LIBUSB claiming device: "+ dev.getDeviceName() + " " + dev.getVendorId() + " " + dev.getProductId());
                 handleUsbDeviceState(dev);
             }
         }
@@ -350,4 +391,7 @@ public class UsbDriverService extends Service implements UsbDriverListener {
         void onUsbPermissionPromptStarting();
         void onUsbPermissionPromptCompleted();
     }
+    public native String initializeNativeDevice(int fileDescriptor);
+    public native String initializeNativeMouseDevice(int fileDescriptor);
+
 }

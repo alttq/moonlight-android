@@ -91,7 +91,8 @@ import java.util.Locale;
 public class Game extends Activity implements SurfaceHolder.Callback,
         OnGenericMotionListener, OnTouchListener, NvConnectionListener, EvdevListener,
         OnSystemUiVisibilityChangeListener, GameGestures, StreamView.InputCallbacks,
-        PerfOverlayListener, UsbDriverService.UsbDriverStateListener, View.OnKeyListener {
+        PerfOverlayListener, UsbDriverService.UsbDriverStateListener, View.OnKeyListener
+{
     private int lastButtonState = 0;
 
     // Only 2 touches are supported
@@ -240,6 +241,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         streamView.setOnGenericMotionListener(this);
         streamView.setOnKeyListener(this);
         streamView.setInputCallbacks(this);
+
+
+
 
         // Listen for touch events on the background touch view to enable trackpad mode
         // to work on areas outside of the StreamView itself. We use a separate View
@@ -438,7 +442,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         // Set to the optimal mode for streaming
         float displayRefreshRate = prepareDisplayForRendering();
-        LimeLog.info("Display refresh rate: "+displayRefreshRate);
+        LimeLog.info("Display refresh rate: "+ displayRefreshRate);
 
         // If the user requested frame pacing using a capped FPS, we will need to change our
         // desired FPS setting here in accordance with the active display refresh rate.
@@ -513,7 +517,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             virtualController.show();
         }
 
-        if (prefConfig.usbDriver) {
+        if (true) {
             // Start the USB driver
             bindService(new Intent(this, UsbDriverService.class),
                     usbDriverServiceConnection, Service.BIND_AUTO_CREATE);
@@ -1088,6 +1092,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             if (prefConfig.enableLatencyToast) {
                 int averageEndToEndLat = decoderRenderer.getAverageEndToEndLatency();
                 int averageDecoderLat = decoderRenderer.getAverageDecoderLatency();
+
                 String message = null;
                 if (averageEndToEndLat > 0) {
                     message = getResources().getString(R.string.conn_client_latency)+" "+averageEndToEndLat+" ms";

@@ -2,6 +2,7 @@
 MY_LOCAL_PATH := $(call my-dir)
 
 include $(call all-subdir-makefiles)
+include D:/libusb/android/jni/libusb.mk
 
 LOCAL_PATH := $(MY_LOCAL_PATH)
 
@@ -46,6 +47,8 @@ LOCAL_SRC_FILES := moonlight-common-c/src/AudioStream.c \
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/moonlight-common-c/enet/include \
                     $(LOCAL_PATH)/moonlight-common-c/reedsolomon \
                     $(LOCAL_PATH)/moonlight-common-c/src \
+LOCAL_C_INCLUDES += D:/libusb
+LOCAL_SHARED_LIBRARIES += libusb1.0
 
 LOCAL_CFLAGS := -DHAS_SOCKLEN_T=1 -DLC_ANDROID -DHAVE_CLOCK_GETTIME=1
 

@@ -2,13 +2,661 @@
 
 #include <jni.h>
 #include <android/log.h>
+#include <unistd.h>
 
 #include <arpa/inet.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "minisdl.h"
 #include "controller_type.h"
 #include "controller_list.h"
+#include <string.h>
+#include <libusb/libusb/libusb.h>
+#include <time.h>
+
+#define TRANSMIT_PAYLOAD 0x04
+#define ENTER_SNIFFER_MODE 0x05
+#define ENTER_PROMISCUOUS_MODE 0x06
+#define ENTER_TONE_TEST_MODE 0x07
+#define TRANSMIT_ACK_PAYLOAD 0x08
+#define SET_CHANNEL 0x09
+#define GET_CHANNEL 0x0A
+#define ENABLE_LNA_PA 0x0B
+#define TRANSMIT_PAYLOAD_GENERIC 0x0C
+#define ENTER_PROMISCUOUS_MODE_GENERIC 0x0D
+#define RECEIVE_PAYLOAD 0x12
+//#define TRANSMIT_PAYLOAD_MOUSE 0x13
+#define EP_DATA_IN	0x01
+#define EP_DATA_OUT	0x81
+#define M_PI 3.14159265358979323846
+#define RADTODEG 180 / M_PI
+#define DEGTORAD M_PI / 180
+
+bool movingmouse = false;
+int currentChannel = 0;
+int dwellTime = 5;
+int usbTimeout = 50;
+unsigned char keepalive[] = { TRANSMIT_PAYLOAD,5, 0, 0, 0x00, 0x40, 0x00, 0x21, 0x9F }; //00:40:00:21:9F
+unsigned char address[] = { 0xE7, 0xF1, 0x97, 0xE4, 0x09 }; //E7:F1:97:E4:09 00:40:00:21:9F
+libusb_device_handle *devh;
+libusb_device_handle *devhMouse;
+
+void enableLNA()
+{
+    int actual_length = 0;
+    unsigned char data[] = { ENABLE_LNA_PA, 0 };
+    unsigned char buff[64];
+    int rc = libusb_bulk_transfer(devh, EP_DATA_IN, data, (int)(64), &actual_length, usbTimeout);
+    if (rc < 0 || actual_length != 64) {
+        //fprintf(stderr, "[+] Error enabling LNA: %s\n", libusb_error_name(rc));
+    }
+    rc = libusb_bulk_transfer(devh, EP_DATA_OUT, buff, (int)((64)), &actual_length, usbTimeout);
+}
+
+void setChecksum(uint8_t* payload, uint8_t len)
+{
+    uint8_t checksum = 0;
+
+    for (uint8_t i = 0; i < (len - 1); i++)
+        checksum += payload[i];
+
+    payload[len - 1] = -checksum;
+}
+
+void constructPacket(unsigned char *readyPack, const unsigned char *testPackge3) {
+    static const unsigned char header[] = { TRANSMIT_PAYLOAD, 10, 0, 0 };
+
+    // Copy the header into readyPack
+    memcpy(readyPack, header, sizeof(header));
+
+    // Copy the testPackge3 into readyPack
+    memcpy(readyPack + 4, testPackge3, 10);  // assuming testPackge3 is always 10 bytes
+}
+void move(uint8_t *package, int16_t x_move, int16_t y_move, uint8_t scroll_v, uint8_t scroll_h, bool leftClick, bool rightClick, bool mouse3)
+{
+    uint8_t mouse_payload[] = { 0x00, 0xC2, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+    uint32_t cursor_velocity;
+
+    cursor_velocity = ((uint32_t)y_move & 0xFFF) << 12 | (x_move & 0xFFF);
+
+    memcpy(mouse_payload + 4, &cursor_velocity, 3);
+
+    if (leftClick)
+    mouse_payload[2] = 1;
+
+    if (rightClick)
+    mouse_payload[2] |= 1 << 1;
+
+    if (mouse3)
+    mouse_payload[2] |= 1 << 2;
+
+    mouse_payload[7] = scroll_v;
+    mouse_payload[8] = scroll_h;
+
+    setChecksum(mouse_payload, 10);
+
+    for (size_t i = 0; i < 10; i++)
+    {
+    package[i] = mouse_payload[i];
+    }
+}
+char sendPing()
+{
+    int actual_length = 0;
+    unsigned char data[] = { TRANSMIT_PAYLOAD, 4, 15, 15, 0x0f, 0x0f, 0x0f, 0x0f };
+
+    int rc = libusb_bulk_transfer(devh, EP_DATA_IN, data, (int)(64), &actual_length, 2500);
+    if (rc < 0 || actual_length != 64) {
+        //fprintf(stderr, "[-] Error transfering payload ping: %s\n", libusb_error_name(rc));
+    }
+    actual_length = 0;
+    unsigned char buff[64];
+    rc = libusb_bulk_transfer(devh, EP_DATA_OUT, buff, (int)((64)), &actual_length, 2500);
+    if (rc < 0) {
+        //fprintf(stderr, "[-] Error reading resp ping: %s\n", libusb_error_name(rc));
+    }
+    return buff[0];
+}
+
+bool sendPacket(unsigned char* packet)
+{
+    if (!packet) {
+        //fprintf(stderr, "[-] Error: Null packet pointer\n");
+        return false;
+    }
+
+    int actual_length = 0;
+    int rc = libusb_bulk_transfer(devh, EP_DATA_IN, packet, 64, &actual_length, usbTimeout);
+    if (rc < 0 || actual_length != 64) {
+        //fprintf(stderr, "[-] Error transferring payload: %s\n", libusb_error_name(rc));
+        return false;
+    }
+    return true;
+}
+
+void setChannel(int channel)
+{
+    int actual_length = 0;
+    unsigned char data[] = { SET_CHANNEL, channel };
+    unsigned char buff[64];
+    int rc = libusb_bulk_transfer(devh, EP_DATA_IN, data, (int)(64), &actual_length, usbTimeout);
+    if (rc < 0 || actual_length != 64) {
+        //fprintf(stderr, "[-] Error setting channel: %s\n", libusb_error_name(rc));
+    }
+    rc = libusb_bulk_transfer(devh, EP_DATA_OUT, buff, (int)((64)), &actual_length, usbTimeout);
+}
+
+void *connect_device(void *fileDescriptor)
+{
+    int startChannel = 2;
+    __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "Initiating libusb device");
+
+    libusb_context * ctx;
+    int r = 0;
+    r = libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY, NULL);
+    r = libusb_init(&ctx);
+    libusb_wrap_sys_device(NULL, (intptr_t)fileDescriptor, &devh);
+
+    int actual_length = 0;
+    unsigned char data[] = { ENTER_SNIFFER_MODE, 5, address[4], address[3], address[2], address[1], address[0] };
+    unsigned char buff[64];
+    int rc = libusb_bulk_transfer(devh, EP_DATA_IN, data, (int)(64), &actual_length, usbTimeout);
+    if (rc < 0 || actual_length != 64) {
+        //fprintf(stderr, "[-] Error setting channel: %s\n", libusb_error_name(rc));
+    }
+    rc = libusb_bulk_transfer(devh, EP_DATA_OUT, buff, (int)((64)), &actual_length, usbTimeout);
+    enableLNA();
+    setChannel(startChannel);
+    int currentChannel = startChannel;
+    struct timespec t_end, last_ping;
+    clock_gettime(CLOCK_MONOTONIC, &t_end);
+    clock_gettime(CLOCK_MONOTONIC, &last_ping);
+
+    while(true)
+    {
+        clock_gettime(CLOCK_MONOTONIC, &t_end);
+        long long elapsed_ms = (t_end.tv_sec - last_ping.tv_sec) * 1000 +
+                               (t_end.tv_nsec - last_ping.tv_nsec) / 1000000;
+        if (elapsed_ms >= dwellTime)
+        {
+            bool test = sendPing();
+            if (test == false)
+            {
+                dwellTime = 5;
+                clock_gettime(CLOCK_MONOTONIC, &last_ping);
+                __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "[-] Ping failed on channel: %d\n", currentChannel);
+
+                if ((currentChannel + 1) > 2 && (currentChannel + 1) < 85)
+                {
+                    currentChannel++;
+                    setChannel(currentChannel);
+                }
+                else {
+                    currentChannel = 2;
+                    setChannel(currentChannel);
+                }
+            }
+            else {
+                __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "[+] Ping success on channel: %d\n", currentChannel);
+
+                //printf("[+] Ping success on channel: %d\n", utilities::currentChannel);
+                if (currentChannel == 2 || currentChannel == 4)
+                {
+                    dwellTime = 15000;
+                }
+                dwellTime = 15000;
+                clock_gettime(CLOCK_MONOTONIC, &last_ping);
+
+            }
+        }
+        usleep(1000);
+    }
+    /*clock_gettime(CLOCK_MONOTONIC, &t_end);
+
+double elapsed = (t_end.tv_sec - t_start.tv_sec) +
+                 (t_end.tv_nsec - t_start.tv_nsec) / 1e9;*/
+
+
+}
+void *thread_function_channelHack(void *arg) {
+
+    while(true){
+
+    }
+    return NULL;
+}
+
+void *thread_functionMouse(void *arg) {
+    intptr_t fileDescriptor = (intptr_t)arg;
+    __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "Mouse initialized");
+
+    libusb_context * ctx;
+    int r = 0;
+    r = libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY, NULL);
+    r = libusb_init(&ctx);
+    libusb_wrap_sys_device(NULL, fileDescriptor, &devhMouse);
+
+    if(libusb_kernel_driver_active(devhMouse, 0) == 1) {
+        r = libusb_detach_kernel_driver(devhMouse, 0);
+        if(r < 0) {
+            __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "Failed to detach kernel\n");
+
+        }
+    }
+    libusb_claim_interface(devhMouse,0);
+    r = libusb_claim_interface(devhMouse, 0);
+    if(r < 0) {
+        __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "Failed to claim interface\n");
+        libusb_close(devhMouse);
+        libusb_exit(ctx);
+        return NULL;
+    }
+    unsigned char data[64];
+    int actual_length;
+    while(true) {
+        r = libusb_bulk_transfer(devhMouse, 0x81, data, sizeof(data), &actual_length, 0);
+        if (r == 0){
+            __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "sending packet");
+            movingmouse = true;
+            int x = (int)data[2] - (int)data[3];
+            if ((int)data[3] == 255)
+                x += -1;
+            int y = (int)data[4] - (int)data[5];
+            if ((int)data[5] == 255)
+                y += -1;
+
+            bool mouse1 = false;
+            bool mouse2 = false;
+            bool mouse3 = false;
+            bool mouse4 = false;
+            bool mouse5 = false;
+
+            int scroll_v = 0;
+            if (data[0] > 0)
+            {
+                if (data[0] > 0)
+                {
+                    switch (data[0])
+                    {
+                        case 1:
+                        {
+                            mouse1 = true;
+                        } break;
+                        case 2:
+                        {
+                            mouse2 = true;
+                        } break;
+                        case 3:
+                        {
+                            mouse1 = true;
+                            mouse2 = true;
+                        } break;
+                        case 4:
+                        {
+                            mouse3 = true;
+                        } break;
+                        case 5:
+                        {
+                            mouse3 = true;
+                            mouse1 = true;
+                        } break;
+                        case 6:
+                        {
+                            mouse3 = true;
+                            mouse2 = true;
+                        } break;
+                        case 7:
+                        {
+                            mouse3 = true;
+                            mouse2 = true;
+                            mouse1 = true;
+                        } break;
+                        case 8:
+                        {
+                            mouse4 = true;
+                        } break;
+                        case 9:
+                        {
+                            mouse4 = true;
+                            mouse1 = true;
+                        } break;
+                        case 10:
+                        {
+                            mouse4 = true;
+                            mouse2 = true;
+                        } break;
+                        case 11:
+                        {
+                            mouse4 = true;
+                            mouse2 = true;
+                            mouse1 = true;
+                        } break;
+                        case 12:
+                        {
+                            mouse4 = true;
+                            mouse3 = true;
+                        } break;
+                        case 13:
+                        {
+                            mouse4 = true;
+                            mouse3 = true;
+                            mouse1 = true;
+                        } break;
+                        case 14:
+                        {
+                            mouse4 = true;
+                            mouse3 = true;
+                            mouse2 = true;
+                        } break;
+                        case 15:
+                        {
+                            mouse4 = true;
+                            mouse3 = true;
+                            mouse2 = true;
+                            mouse1 = true;
+                        } break;
+                        case 16:
+                        {
+                            mouse5 = true;
+                        } break;
+                        case 17:
+                        {
+                            mouse5 = true;
+                            mouse1 = true;
+                        } break;
+                        case 18:
+                        {
+                            mouse5 = true;
+                            mouse2 = true;
+                        } break;
+                        case 19:
+                        {
+                            mouse5 = true;
+                            mouse2 = true;
+                            mouse1 = true;
+                        } break;
+                        case 20:
+                        {
+                            mouse5 = true;
+                            mouse3 = true;
+                        } break;
+                        case 21:
+                        {
+                            mouse5 = true;
+                            mouse3 = true;
+                            mouse1 = true;
+                        } break;
+                        case 22:
+                        {
+                            mouse5 = true;
+                            mouse3 = true;
+                            mouse2 = true;
+                        } break;
+                        case 23:
+                        {
+                            mouse5 = true;
+                            mouse3 = true;
+                            mouse2 = true;
+                            mouse1 = true;
+                        } break;
+                        case 24:
+                        {
+                            mouse5 = true;
+                            mouse4 = true;
+                        } break;
+                        case 25:
+                        {
+                            mouse5 = true;
+                            mouse4 = true;
+                            mouse1 = true;
+                        } break;
+                        case 26:
+                        {
+                            mouse5 = true;
+                            mouse4 = true;
+                            mouse2 = true;
+                        } break;
+                        case 27:
+                        {
+                            mouse5 = true;
+                            mouse4 = true;
+                            mouse2 = true;
+                            mouse1 = true;
+                        } break;
+                        case 28:
+                        {
+                            mouse5 = true;
+                            mouse4 = true;
+                            mouse3 = true;
+                        } break;
+                        case 29:
+                        {
+                            mouse5 = true;
+                            mouse4 = true;
+                            mouse3 = true;
+                            mouse1 = true;
+                        } break;
+                        case 30:
+                        {
+                            mouse5 = true;
+                            mouse4 = true;
+                            mouse3 = true;
+                            mouse2 = true;
+                        } break;
+                        case 31:
+                        {
+                            mouse5 = true;
+                            mouse4 = true;
+                            mouse3 = true;
+                            mouse2 = true;
+                            mouse1 = true;
+                        } break;
+                        default:
+                        {
+                            // Handle any case not covered by the switch
+                        } break;
+                    }
+                }
+            }
+
+            if (data[6] != 0)
+            {
+                if (data[6] == 255)
+                {
+                    scroll_v = -1;
+                }
+                else if (data[6] == 1)
+                {
+                    scroll_v = 1;
+                }
+            }
+            //__android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "sending Mouse movement: X: %d, Y: %d \n",  x, y);
+            //__android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "data[5] %d", data[6]);
+            //__android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "mouse data %d %d %d %d %d %d %d % d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d /n", data[0], data[1], data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15], data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23], data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31], data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39], data[40], data[41], data[42], data[43], data[44], data[45], data[46], data[47], data[48], data[49], data[50], data[51], data[52], data[53], data[54], data[55], data[56], data[57], data[58], data[59], data[60], data[61], data[62], data[63]);
+            //if (data[])
+            unsigned char testPackge3[] = { 0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0 };
+            unsigned char readyPack[] = { TRANSMIT_PAYLOAD, 10, 0, 0, 0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0 };
+            move(testPackge3, x, y, scroll_v, 0, mouse1, mouse2, mouse3);
+            constructPacket(readyPack, testPackge3);
+            sendPacket(readyPack);
+            movingmouse = false;
+        }
+        /*
+        else if(r != 0){
+            if (currentChannel == 2 || currentChannel == 4)
+            {
+                sendPacket(keepalive);
+            }
+            __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "sending keepalive");
+
+
+        }*/
+    }
+
+    //printf("Thread is running with number: %d\n", *number);
+    //sleep(2);  // Simulate some work
+    // printf("Thread is finishing\n");
+    return NULL;
+}
+void *thread_function(void *arg) {
+    intptr_t fileDescriptor = (intptr_t)arg;
+    int startChannel = 2;
+    __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "Initiating libusb device");
+
+    libusb_context * ctx;
+    int r = 0;
+    r = libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY, NULL);
+    r = libusb_init(&ctx);
+    libusb_wrap_sys_device(NULL, fileDescriptor, &devh);
+
+    int actual_length = 0;
+    unsigned char data[] = { ENTER_SNIFFER_MODE, 5, address[4], address[3], address[2], address[1], address[0] };
+    unsigned char buff[64];
+    int rc = libusb_bulk_transfer(devh, EP_DATA_IN, data, (int)(64), &actual_length, usbTimeout);
+    if (rc < 0 || actual_length != 64) {
+        //fprintf(stderr, "[-] Error setting channel: %s\n", libusb_error_name(rc));
+    }
+    rc = libusb_bulk_transfer(devh, EP_DATA_OUT, buff, (int)((64)), &actual_length, usbTimeout);
+    enableLNA();
+    setChannel(startChannel);
+    currentChannel = startChannel;
+    struct timespec t_end, last_ping;
+    clock_gettime(CLOCK_MONOTONIC, &t_end);
+    clock_gettime(CLOCK_MONOTONIC, &last_ping);
+    while(true)
+    {
+        clock_gettime(CLOCK_MONOTONIC, &t_end);
+        long long elapsed_ms = (t_end.tv_sec - last_ping.tv_sec) * 1000 +
+                               (t_end.tv_nsec - last_ping.tv_nsec) / 1000000;
+        if (elapsed_ms >= dwellTime)
+        {
+            bool test = sendPing();
+            if (test == false)
+            {
+                dwellTime = 5;
+                clock_gettime(CLOCK_MONOTONIC, &last_ping);
+                __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "[-] Ping failed on channel: %d\n", currentChannel);
+
+                if ((currentChannel + 1) > 2 && (currentChannel + 1) < 85)
+                {
+                    currentChannel++;
+                    setChannel(currentChannel);
+                }
+                else {
+                    currentChannel = 2;
+                    setChannel(currentChannel);
+                }
+            }
+            else {
+                //__android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "[+] Ping success on channel: %d\n", currentChannel);
+
+                //printf("[+] Ping success on channel: %d\n", utilities::currentChannel);
+                if (currentChannel == 2 || currentChannel == 4)
+                {
+                    if (!movingmouse)
+                    {
+                        //__android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "sending keepalive");
+                        sendPacket(keepalive);
+                    }
+
+                    dwellTime = 15000;
+                }
+                clock_gettime(CLOCK_MONOTONIC, &last_ping);
+
+            }
+        }
+        else{
+            if (currentChannel == 2 || currentChannel == 4)
+            {
+                if (!movingmouse)
+                {
+                    //__android_log_print(ANDROID_LOG_INFO, "moonlight-common-c", "sending keepalive");
+                    sendPacket(keepalive);
+                    usleep(1000);
+                }
+            }
+        }
+        usleep(1000);
+    }
+    //printf("Thread is running with number: %d\n", *number);
+    //sleep(2);  // Simulate some work
+   // printf("Thread is finishing\n");
+    return NULL;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_limelight_binding_input_driver_UsbDriverService_initializeNativeDevice(JNIEnv *env,
+                                                                                jobject thiz,
+                                                                                jint file_descriptor) {
+    pthread_t thread_id;
+
+    // Pass file_descriptor directly, cast to void*
+    int result = pthread_create(&thread_id, NULL, thread_function, (void*)(intptr_t)file_descriptor);
+
+    if (result != 0) {
+        // Handle error
+    }
+
+    // Join the thread
+    result = pthread_detach(thread_id);
+    if (result != 0) {
+        // Handle error
+    }
+
+    return (*env)->NewStringUTF(env, "Device initialized");  // Or appropriate return value
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_limelight_binding_input_driver_UsbDriverService_initializeNativeMouseDevice(JNIEnv *env,
+                                                                                     jobject thiz,
+                                                                                     jint file_descriptor) {
+    // TODO: implement initializeNativeMouseDevice()
+    pthread_t thread_id;
+
+    // Pass file_descriptor directly, cast to void*
+    int result = pthread_create(&thread_id, NULL, thread_functionMouse, (void*)(intptr_t)file_descriptor);
+
+    if (result != 0) {
+        // Handle error
+    }
+
+    // Join the thread
+    result = pthread_detach(thread_id);
+    if (result != 0) {
+        // Handle error
+    }
+
+    return (*env)->NewStringUTF(env, "Device initialized");  // Or appropriate return value
+}
+/*
+JNIEXPORT jstring JNICALL
+Java_com_limelight_binding_input_driver_UsbDriverService_initializeNativeDevice(JNIEnv *env,
+                                                                                jobject thiz,
+                                                                                jint file_descriptor){
+
+    // TODO: implement initializeNativeDevice()
+
+    pthread_t thread_id;
+    int number_to_pass = 42;
+
+    int result = pthread_create(&thread_id, NULL, thread_function, (void *)&file_descriptor);
+
+    if (result != 0) {
+
+    }
+
+    // Detach the thread
+    result = pthread_join(thread_id, NULL);
+    if (result != 0) {
+
+    }
+
+
+    return 0;
+
+}*/
 
 JNIEXPORT void JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_sendMouseMove(JNIEnv *env, jclass clazz, jshort deltaX, jshort deltaY) {
@@ -259,3 +907,5 @@ Java_com_limelight_nvstream_jni_MoonBridge_guessControllerHasShareButton(JNIEnv 
     // Xbox Elite and DualSense Edge controllers have paddles
     return SDL_IsJoystickXboxSeriesX(vendorId, productId);
 }
+
+
