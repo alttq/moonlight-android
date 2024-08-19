@@ -3,7 +3,6 @@ package com.limelight.binding.video;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.IntBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -24,12 +23,12 @@ import com.limelight.preferences.PreferenceConfiguration;
 import android.annotation.TargetApi;
 import android.app.Activity;
 import android.content.Context;
+import android.media.Image;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.media.MediaCodec.BufferInfo;
 import android.media.MediaCodec.CodecException;
-import android.opengl.GLES20;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -38,6 +37,83 @@ import android.os.SystemClock;
 import android.util.Range;
 import android.view.Choreographer;
 import android.view.SurfaceHolder;
+import android.graphics.Bitmap;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import android.graphics.Color;
+
+class Vector2 {
+    public float x, y;
+
+    public Vector2(float x, float y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    public Vector2 add(Vector2 other) {
+        return new Vector2(this.x + other.x, this.y + other.y);
+    }
+
+    public float len() {
+        return (float) Math.sqrt(x * x + y * y);
+    }
+}
+
+class PixelSearcher {
+    private static final int size = 60;
+    private int monitor = 0;
+    private boolean useIstrigFilter; // This was not defined in the C++ code, so you'll need to set it
+
+    // You'll need to define these somewhere in your code or in a separate Config class
+    private static class cfg {
+        static int color_mode;
+        static int[] menorRGB = new int[3];
+        static int[] maiorRGB = new int[3];
+        static int[] menorHSV = new int[3];
+        static int[] maiorHSV = new int[3];
+    }
+
+    private void RGBtoHSV(int r, int g, int b, float[] hsv) {
+        Color.RGBToHSV(r, g, b, hsv);
+    }
+
+    public boolean IsPurpleColor(int red, int green, int blue) {
+        float[] hsv = new float[3];
+        RGBtoHSV(red, green, blue, hsv);
+
+        cfg.menorRGB[0] = 70;
+        cfg.menorRGB[1] = 0;
+        cfg.menorRGB[2] = 120;
+
+        cfg.maiorRGB[0] = 255;
+        cfg.maiorRGB[1] = 190;
+        cfg.maiorRGB[2] = 255;
+
+        cfg.menorHSV[0] = 270;
+        cfg.menorHSV[1] = 38;
+        cfg.menorHSV[2] = 40;
+
+        cfg.maiorHSV[0] = 310;
+        cfg.maiorHSV[1] = 100;
+        cfg.maiorHSV[2] = 100;
+
+        int hue_int = (int) (hsv[0] * 360);
+        int saturation_int = (int) (hsv[1] * 100);
+        int value_int = (int) (hsv[2] * 100);
+
+        if( red >= cfg.menorRGB[0] && red <= cfg.maiorRGB[0] &&
+                green >= cfg.menorRGB[1] && green <= cfg.maiorRGB[1] &&
+                blue >= cfg.menorRGB[2] && blue <= cfg.maiorRGB[2] &&
+                hue_int >= cfg.menorHSV[0] && hue_int <= cfg.maiorHSV[0] &&
+                saturation_int >= cfg.menorHSV[1] && saturation_int <= cfg.maiorHSV[1] &&
+                value_int >= cfg.menorHSV[2] && value_int <= cfg.maiorHSV[2]){
+            return true;
+        }
+        return false;
+
+    }
+}
 
 public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements Choreographer.FrameCallback {
 
@@ -46,7 +122,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
     // Used on versions < 5.0
     private ByteBuffer[] legacyInputBuffers;
-
+    private PixelSearcher pixelSearcher;
     private MediaCodecInfo avcDecoder;
     private MediaCodecInfo hevcDecoder;
     private MediaCodecInfo av1Decoder;
@@ -60,9 +136,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private int nextInputBufferIndex = -1;
     private ByteBuffer nextInputBuffer;
 
+    private long nativeBooleanPointer;
+
+
     private Context context;
     private Activity activity;
     private MediaCodec videoDecoder;
+    private ByteBuffer[] outputBuffers;
     private Thread rendererThread;
     private boolean needsSpsBitstreamFixup, isExynos4;
     private boolean adaptivePlayback, directSubmit, fusedIdrFrame;
@@ -537,9 +617,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             }
         }
 
-        LimeLog.info("Configuring with format: "+format);
+        LimeLog.info("Configuring with format: " + format);
+        //videoDecoder.configure(format, renderTarget.getSurface(), null, 0);
+        videoDecoder.configure(format, null, null, 0);
 
-        videoDecoder.configure(format, renderTarget.getSurface(), null, 0);
 
         configuredFormat = format;
 
@@ -563,6 +644,220 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
             legacyInputBuffers = videoDecoder.getInputBuffers();
         }
+    }
+
+    //prefs.fullRange
+    private long lastTime = 0;
+    private int frameCount = 0;
+    private float fps = 0.0f;
+
+    public class PurpleColorException extends Exception {
+        public PurpleColorException() {
+            super("Purple color detected");
+        }
+    }
+
+    public boolean isPurpleColor(int red, int green, int blue) {
+        if (green >= 170) {
+            return false;
+        }
+
+        if (green >= 120) {
+            return Math.abs(red - blue) <= 8 &&
+                    red - green >= 50 &&
+                    blue - green >= 50 &&
+                    red >= 105 &&
+                    blue >= 105;
+        }
+
+        return Math.abs(red - blue) <= 13 &&
+                red - green >= 60 &&
+                blue - green >= 60 &&
+                red >= 110 &&
+                blue >= 100;
+    }
+    int myInternlFrame = 0;
+    public void processFrame(Image image) {
+        if (image == null) {
+            return;
+        }
+        if (numFramesIn > myInternlFrame)
+        {
+            myInternlFrame = numFramesIn;
+        }
+        else
+        {
+            return;
+        }
+
+
+        long start = System.nanoTime();
+        final int maxCount = 15;
+        final int forSize = 100;
+        List<Vector2> vects = new ArrayList<>();
+
+        // Rest of the code to process the frame (same as before)
+        int width = image.getWidth();
+        int height = image.getHeight();
+        int centerX = width / 2;
+        int centerY = height / 2;
+
+        Image.Plane[] planes = image.getPlanes();
+        ByteBuffer yBuffer = planes[0].getBuffer();
+        int yRowStride = planes[0].getRowStride();
+        int yPixelStride = planes[0].getPixelStride();
+
+        ByteBuffer uBuffer = planes[1].getBuffer();
+        int uRowStride = planes[1].getRowStride();
+        int uPixelStride = planes[1].getPixelStride();
+
+        ByteBuffer vBuffer = planes[2].getBuffer();
+        int vRowStride = planes[2].getRowStride();
+        int vPixelStride = planes[2].getPixelStride();
+        int fovY = 18;
+        int fovX = 27;
+
+        int fovYtrigger = 3;
+        int fovXrigger = 1;
+
+
+        if (getMouse1())
+        {
+            for (int y = centerY + fovY; y >= centerY - fovY; y--) {
+                for (int x = centerX - fovX; x <= centerX + fovX; x++)
+                {
+                    int yIndex = y * yRowStride + x * yPixelStride;
+                    int uvIndex = (y / 2) * uRowStride + (x / 2) * uPixelStride;
+
+                    int yValue = yBuffer.get(yIndex) & 0xFF;
+                    int uValue = uBuffer.get(uvIndex) & 0xFF;
+                    int vValue = vBuffer.get(uvIndex) & 0xFF;
+
+                    float yNorm, uNorm, vNorm;
+
+                    if (prefs.fullRange) {
+                        yNorm = yValue / 255.0f;
+                        uNorm = (uValue - 128) / 255.0f;
+                        vNorm = (vValue - 128) / 255.0f;
+                    } else {
+                        yNorm = (yValue - 16) / 219.0f;
+                        uNorm = (uValue - 128) / 224.0f;
+                        vNorm = (vValue - 128) / 224.0f;
+                    }
+
+                    float r = yNorm + 1.5748f * vNorm;
+                    float g = yNorm - 0.1873f * uNorm - 0.4681f * vNorm;
+                    float b = yNorm + 1.8556f * uNorm;
+
+                    r = Math.max(0, Math.min(1, r));
+                    g = Math.max(0, Math.min(1, g));
+                    b = Math.max(0, Math.min(1, b));
+
+                    int rInt = Math.round(r * 255);
+                    int gInt = Math.round(g * 255);
+                    int bInt = Math.round(b * 255);
+
+                    pixelSearcher = new PixelSearcher();
+
+
+                    if (isPurpleColor(rInt, gInt, bInt)) {
+                        //imeLog.info("Center Pixel RGB: R=" + rInt + " G=" + gInt + " B=" + bInt + " frameNumber: " + myInternlFrame);
+                        // LimeLog.info("Purple color detected");
+                        vects.add(new Vector2(x - centerX, y - centerY));
+                    }
+                }
+            }
+            if (!vects.isEmpty()) {
+                Collections.sort(vects, (lhs, rhs) -> Float.compare(lhs.y, rhs.y));
+                List<Vector2> forbidden = new ArrayList<>();
+
+                for (Vector2 current : vects) {
+                    boolean canUpdate = true;
+                    if (Math.abs(current.x) > fovX || Math.abs(current.y) > fovY) {
+                        continue;
+                    }
+                    for (Vector2 forb : forbidden) {
+                        if (current.add(forb).len() < forSize) {
+                            canUpdate = false;
+                            break;
+                        }
+                        if (Math.abs(current.x + forb.x) < forSize) {
+                            canUpdate = false;
+                            break;
+                        }
+                    }
+                    if (canUpdate) {
+                        forbidden.add(0, current);
+                        if (forbidden.size() > maxCount) {
+                            break;
+                        }
+                    }
+                }
+                if (!forbidden.isEmpty()) {
+                    Collections.sort(forbidden, (lhs, rhs) -> Float.compare(lhs.len(), rhs.len()));
+
+                    Vector2 newvec1 = forbidden.get(0);
+                    newvec1.x += 2;
+                    newvec1.y += 2;
+                    moveMouse((int) newvec1.x, (int)newvec1.y, width, height);
+                    vects.clear();
+                    return;
+                }
+            }
+        }
+        if (getMouse5())
+        {
+            LimeLog.info("Mouse5");
+
+            for (int y = centerY + fovYtrigger; y >= centerY - fovYtrigger; y--) {
+                for (int x = centerX - fovXrigger; x <= centerX + fovXrigger; x++)
+                {
+                    int yIndex = y * yRowStride + x * yPixelStride;
+                    int uvIndex = (y / 2) * uRowStride + (x / 2) * uPixelStride;
+
+                    int yValue = yBuffer.get(yIndex) & 0xFF;
+                    int uValue = uBuffer.get(uvIndex) & 0xFF;
+                    int vValue = vBuffer.get(uvIndex) & 0xFF;
+
+                    float yNorm, uNorm, vNorm;
+
+                    if (prefs.fullRange) {
+                        yNorm = yValue / 255.0f;
+                        uNorm = (uValue - 128) / 255.0f;
+                        vNorm = (vValue - 128) / 255.0f;
+                    } else {
+                        yNorm = (yValue - 16) / 219.0f;
+                        uNorm = (uValue - 128) / 224.0f;
+                        vNorm = (vValue - 128) / 224.0f;
+                    }
+
+                    float r = yNorm + 1.5748f * vNorm;
+                    float g = yNorm - 0.1873f * uNorm - 0.4681f * vNorm;
+                    float b = yNorm + 1.8556f * uNorm;
+
+                    r = Math.max(0, Math.min(1, r));
+                    g = Math.max(0, Math.min(1, g));
+                    b = Math.max(0, Math.min(1, b));
+
+                    int rInt = Math.round(r * 255);
+                    int gInt = Math.round(g * 255);
+                    int bInt = Math.round(b * 255);
+
+                    pixelSearcher = new PixelSearcher();
+
+
+                    if (isPurpleColor(rInt, gInt, bInt)) {
+                        LimeLog.info("Center Pixel RGB: R=" + rInt + " G=" + gInt + " B=" + bInt + " frameNumber: " + myInternlFrame);
+                        // LimeLog.info("Purple color detected");
+                        isPurple();
+                        return;
+                    }
+                }
+            }
+        }
+
+
+
     }
 
     private boolean tryConfigureDecoder(MediaCodecInfo selectedDecoderInfo, MediaFormat format, boolean throwOnCodecError) {
@@ -1048,104 +1343,28 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
 
 
-    private void startRendererThread()
-    {
+    private void startRendererThread() {
         rendererThread = new Thread() {
             @Override
             public void run() {
                 BufferInfo info = new BufferInfo();
                 while (!stopping) {
                     try {
-                        // Try to output a frame
                         int outIndex = videoDecoder.dequeueOutputBuffer(info, 50000);
                         if (outIndex >= 0) {
-                            long presentationTimeUs = info.presentationTimeUs;
-                            int lastIndex = outIndex;
-
-                            numFramesOut++;
-
-                            // Render the latest frame now if frame pacing isn't in balanced mode
-                            if (prefs.framePacing != PreferenceConfiguration.FRAME_PACING_BALANCED) {
-                                // Get the last output buffer in the queue
-                                while ((outIndex = videoDecoder.dequeueOutputBuffer(info, 0)) >= 0) {
-                                    videoDecoder.releaseOutputBuffer(lastIndex, false);
-
-                                    numFramesOut++;
-
-                                    lastIndex = outIndex;
-                                    presentationTimeUs = info.presentationTimeUs;
-                                }
-
-                                if (prefs.framePacing == PreferenceConfiguration.FRAME_PACING_MAX_SMOOTHNESS ||
-                                        prefs.framePacing == PreferenceConfiguration.FRAME_PACING_CAP_FPS) {
-                                    // In max smoothness or cap FPS mode, we want to never drop frames
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                                        // Use a PTS that will cause this frame to never be dropped
-                                        videoDecoder.releaseOutputBuffer(lastIndex, 0);
-
-                                    }
-                                    else {
-                                        videoDecoder.releaseOutputBuffer(lastIndex, true);
-                                    }
-                                }
-                                else {
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                                        // Use a PTS that will cause this frame to be dropped if another comes in within
-                                        // the same V-sync period
-                                        videoDecoder.releaseOutputBuffer(lastIndex, System.nanoTime());
-
-
-                                    }
-                                    else {
-                                        videoDecoder.releaseOutputBuffer(lastIndex, true);
-                                    }
-                                }
-
-                                activeWindowVideoStats.totalFramesRendered++;
-                            }
-                            else {
-                                // For balanced frame pacing case, the Choreographer callback will handle rendering.
-                                // We just put all frames into the output buffer queue and let it handle things.
-
-                                // Discard the oldest buffer if we've exceeded our limit.
-                                //
-                                // NB: We have to do this on the producer side because the consumer may not
-                                // run for a while (if there is a huge mismatch between stream FPS and display
-                                // refresh rate).
-                                if (outputBufferQueue.size() == OUTPUT_BUFFER_QUEUE_LIMIT) {
-                                    try {
-                                        videoDecoder.releaseOutputBuffer(outputBufferQueue.take(), false);
-                                    } catch (InterruptedException e) {
-                                        // We're shutting down, so we can just drop this buffer on the floor
-                                        // and it will be reclaimed when the codec is released.
-                                        return;
-                                    }
-                                }
-
-                                // Add this buffer
-                                outputBufferQueue.add(lastIndex);
+                            Image image = null;
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                                image = videoDecoder.getOutputImage(outIndex);
                             }
 
-                            // Add delta time to the totals (excluding probable outliers)
-                            long delta = SystemClock.uptimeMillis() - (presentationTimeUs / 1000);
-                            if (delta >= 0 && delta < 1000) {
-                                activeWindowVideoStats.decoderTimeMs += delta;
-                                if (!USE_FRAME_RENDER_TIME) {
-                                    activeWindowVideoStats.totalTimeMs += delta;
-                                }
+                            if (image != null) {
+                                // Process the frame here
+                                processFrame(image);
+                                image.close();
                             }
-                        } else {
-                            switch (outIndex) {
-                                case MediaCodec.INFO_TRY_AGAIN_LATER:
-                                    break;
-                                case MediaCodec.INFO_OUTPUT_FORMAT_CHANGED:
-                                    LimeLog.info("Output format changed");
-                                    outputFormat = videoDecoder.getOutputFormat();
-                                    LimeLog.info("New output format: " + outputFormat);
-                                    break;
-                                default:
-                                    break;
-                            }
+
+                            // Release the buffer back to the decoder
+                            videoDecoder.releaseOutputBuffer(outIndex, false);
                         }
                     } catch (IllegalStateException e) {
                         handleDecoderException(e);
@@ -1155,8 +1374,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 }
             }
         };
-        rendererThread.setName("Video - Renderer (MediaCodec)");
-        rendererThread.setPriority(Thread.NORM_PRIORITY + 2);
+        rendererThread.setName("Video - Frame Processor");
+        rendererThread.setPriority(Thread.MAX_PRIORITY);
         rendererThread.start();
     }
 
@@ -1976,4 +2195,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             return str;
         }
     }
+
+    //public native String pixels(int[] yuvUnsigned);
+    public native boolean isPurple();
+    public native boolean getMouse1();
+    public native boolean getMouse5();
+    public native boolean moveMouse(int x, int y, int w, int h);
+
 }
