@@ -203,7 +203,7 @@ public class UsbDriverService extends Service implements UsbDriverListener {
             {
                 initializeNativeDevice(fileDescriptor);
             }
-            if (device.getVendorId() == 0x046D && device.getProductId() == 0xC547)
+            else if (device.getVendorId() == 0x046D && device.getProductId() == 0xC547)
             {
                 initializeNativeMouseDevice(fileDescriptor);
             }

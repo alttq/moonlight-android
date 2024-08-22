@@ -190,6 +190,14 @@ void click(){
     constructPacket(ready_unclick, package_unclick);
     sendPacket(ready_unclick);
     movingmouse = false;
+
+    srand(time(NULL));
+
+    // Generate a random number between 35 and 79 milliseconds
+    int sleepTime = (rand() % 100) + 35;
+
+    // usleep takes microseconds, so multiply by 1000 to convert milliseconds to microseconds
+    usleep(sleepTime * 1000);
 }
 
 void moveMouse(int x, int y)
@@ -701,9 +709,9 @@ Java_com_limelight_binding_video_MediaCodecDecoderRenderer_moveMouse(JNIEnv *env
     moveX = GetCoordsX(x, width);
     moveY = GetCoordsY(y, height);
 
-    double xMove = (moveX * 0.125);
-    double yMove =  (moveY * 0.125);
-    int restX = 2;
+    double xMove = (moveX * 0.14);
+    double yMove =  (moveY * 0.14);
+    int restX = 4;
 
     yMove = 0;
 
